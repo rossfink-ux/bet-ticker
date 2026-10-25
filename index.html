@@ -76,6 +76,18 @@ body {
 .lose { color: var(--lose); } .pill.lose { background: var(--lose-bg); }
 .pre, .push { color: var(--pre); } .pill.pre, .pill.push { background: var(--pre-bg); }
 .empty { color: var(--dim); font-size: 20px; grid-column: 1 / -1; }
+/* NFL scores strip */
+.scores { flex: 0 0 auto; height: 58px; overflow: hidden; position: relative; border-top: 1px solid var(--rule); background: #07090a; }
+.scores-track { position: absolute; top: 0; bottom: 0; left: 0; display: flex; will-change: transform; }
+.run { display: flex; align-items: center; white-space: nowrap; }
+.g { display: inline-flex; align-items: center; gap: 8px; padding: 0 22px; border-right: 1px solid var(--rule); height: 58px; font-family: var(--num); font-size: 24px; font-weight: 600; }
+.g .logo { width: 30px; height: 30px; }
+.g .logo img { width: 23px; height: 23px; }
+.g .sc { font-weight: 700; min-width: 1.2em; text-align: right; font-variant-numeric: tabular-nums; margin-right: 6px; }
+.g .trail { color: var(--dim); }
+.g .gclock { font-size: 19px; color: var(--dim); margin-left: 4px; }
+.g .gclock.live { color: var(--pre); }
+.scores .none { padding: 0 22px; line-height: 58px; color: var(--dim); font-size: 19px; }
 .legs { display: grid; gap: 8px; margin: 6px 0 4px; }
 .leg { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
@@ -127,6 +139,7 @@ form button { grid-column: 1 / -1; background: #1d3a24; border-color: #2c5a37; }
   <button id="openEditor" type="button">Bets</button>
 </header>
 <main class="board wrap" id="board"></main>
+<footer class="scores" aria-label="NFL scores"><div class="scores-track" id="scoresTrack"></div></footer>
 
 <div class="editor" id="editor" hidden>
   <div class="sheet" role="dialog" aria-label="Edit bets">
@@ -647,7 +660,77 @@ function render() {
   $("nPre").textContent = results.filter(r => r.tone === "pre").length;
 }
 
+/* ---------- NFL scores strip ---------- */
+const SCROLL_PX_PER_SEC = 90;
+let games = [], scoresDirty = false;
+
+async function loadScores() {
+  try {
+    const data = await getJSON(`${LEAGUES.nfl}/scoreboard`);
+    const order = { in: 0, pre: 1, post: 2 };
+    games = (data.events || []).map(ev => {
+      const comp = ev.competitions[0];
+      const side = where => {
+        const c = comp.competitors.find(x => x.homeAway === where);
+        return { abbr: c.team.abbreviation, logo: c.team.logo, score: Number(c.score) || 0 };
+      };
+      const st = ev.status.type;
+      const detail = st.state === "pre" ? st.shortDetail.replace(" - ", " ").replace(/ E[DS]T$/, "") : st.shortDetail;
+      return { state: st.state, detail, away: side("away"), home: side("home") };
+    }).sort((a, b) => order[a.state] - order[b.state]);
+    scoresDirty = true;
+  } catch { /* keep showing the last scores */ }
+}
+
+function gameChip(g) {
+  const chip = el("span", "g");
+  const team = (t, other) => {
+    chip.append(teamTag(t.abbr, t.logo));
+    if (g.state !== "pre") chip.append(el("span", `sc ${t.score < other.score ? "trail" : ""}`, String(t.score)));
+  };
+  team(g.away, g.home);
+  team(g.home, g.away);
+  chip.append(el("span", `gclock ${g.state === "in" ? "live" : ""}`, g.detail));
+  return chip;
+}
+
+// Two identical runs scroll side by side so the strip loops with no gap. New scores swap in
+// when a run finishes passing, so nothing jumps mid-read.
+function buildScores() {
+  const track = $("scoresTrack");
+  track.replaceChildren();
+  if (!games.length) { track.append(el("div", "none", "No NFL games on the schedule")); return; }
+  for (let i = 0; i < 2; i++) {
+    const run = el("div", "run");
+    for (const g of games) run.append(gameChip(g));
+    track.append(run);
+  }
+}
+
+let scrollX = 0, lastFrame = null;
+function scrollScores(t) {
+  const track = $("scoresTrack");
+  const dt = lastFrame == null ? 0 : Math.min(0.1, (t - lastFrame) / 1000);
+  lastFrame = t;
+  if (scoresDirty && !track.firstElementChild) { buildScores(); scoresDirty = false; }
+  const run = track.firstElementChild;
+  const width = run && run.classList.contains("run") ? run.offsetWidth : 0;
+  if (width) {
+    scrollX -= SCROLL_PX_PER_SEC * dt;
+    if (scrollX <= -width) {
+      scrollX += width;
+      if (scoresDirty) { buildScores(); scoresDirty = false; }
+    }
+  } else {
+    scrollX = 0;
+    if (scoresDirty) { buildScores(); scoresDirty = false; }
+  }
+  track.style.transform = `translate3d(${scrollX}px,0,0)`;
+  requestAnimationFrame(scrollScores);
+}
+
 async function refresh() {
+  loadScores();
   try {
     await loadSharedBets();
     results = await Promise.all([...fileBets, ...bets].map(safeEvaluate));
@@ -767,6 +850,7 @@ if ("wakeLock" in navigator) requestWake();
 
 refresh();
 setInterval(refresh, POLL_MS);
+requestAnimationFrame(scrollScores);
 </script>
 </body>
 </html>
