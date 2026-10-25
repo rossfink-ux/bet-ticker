@@ -56,7 +56,7 @@ body {
   padding-block: 4px 24px;
   display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 14px; align-content: start;
 }
-.bet { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px 16px; display: grid; gap: 6px; min-width: 0; }
+.bet { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px 16px; display: grid; gap: 6px; align-content: start; min-width: 0; }
 .meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 16px; color: var(--dim); font-weight: 500; }
 .teams { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
 .logo { width: 34px; height: 34px; border-radius: 50%; background: #eef1f3; display: inline-flex; align-items: center; justify-content: center; flex: none; }
@@ -76,6 +76,13 @@ body {
 .lose { color: var(--lose); } .pill.lose { background: var(--lose-bg); }
 .pre, .push { color: var(--pre); } .pill.pre, .pill.push { background: var(--pre-bg); }
 .empty { color: var(--dim); font-size: 20px; grid-column: 1 / -1; }
+.legs { display: grid; gap: 8px; margin: 6px 0 4px; }
+.leg { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.leg-name { font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.leg-sub { font-size: 14px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.leg-val { font-family: var(--num); font-size: 26px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.leg-line { font-size: 17px; color: var(--dim); font-weight: 600; }
 
 button, select, input { font: inherit; color: var(--text); background: #15181b; border: 1px solid #2a2f34; border-radius: 6px; }
 button { padding: 9px 16px; font-size: 17px; font-weight: 600; cursor: pointer; }
@@ -282,6 +289,18 @@ function parseLine(text) {
   return { type: "prop", league, game: t[0], player: t.slice(1).join(" "), stat, side, line };
 }
 
+// "PARLAY leg + leg + leg". Legs are split on a spaced " + " so stats like rush+rec stay whole.
+function parseBetLine(text) {
+  const m = text.match(/^parlay\s+(.*)$/i);
+  if (!m) return parseLine(text);
+  const legs = m[1].split(/\s+\+\s+/).map((leg, i) => {
+    try { return parseLine(leg); }
+    catch (e) { throw new Error(`leg ${i + 1}: ${e.message}`); }
+  });
+  if (legs.length < 2) throw new Error("a parlay needs at least two legs separated by +");
+  return { type: "parlay", legs };
+}
+
 // Paste the sheet's link here, or in the Bets panel on the iPad. The sheet must be shared as "Anyone with the link can view".
 const GOOGLE_SHEET = "https://docs.google.com/spreadsheets/d/1tJbju8gJTeF9zOG_u8dGUxeXW7796c5ftq8ns76Wbts/edit";
 let sheetLink = load("betticker.sheet", GOOGLE_SHEET);
@@ -338,7 +357,7 @@ async function loadSharedBets() {
   lines.forEach((raw, i) => {
     const text = raw.replace(/#.*/, "").trim();
     if (!text) return;
-    try { parsed.push({ ...parseLine(text), fromFile: true }); }
+    try { parsed.push({ ...parseBetLine(text), fromFile: true }); }
     catch (e) { errors.push({ line: i + 1, text, message: e.message }); }
   });
   fileBets = parsed; fileErrors = errors;
@@ -519,7 +538,23 @@ async function evaluate(bet) {
     }
     return { ...base, value: `${mine}-${theirs}`, note, tone, pill };
   }
+  if (bet.type === "parlay") return evaluateParlay(bet);
   return { name: "Unknown bet", line: "", value: null, tone: "lose", pill: String(bet.type), game: null, pct: null };
+}
+
+// A parlay is lost once any leg loses, won once every leg wins. Pushed legs drop out, as at most books.
+async function evaluateParlay(bet) {
+  const legs = await Promise.all(bet.legs.map(safeEvaluate));
+  const live = legs.filter(l => l.pill !== "Push");
+  const hitting = live.filter(l => l.tone === "win").length;
+  const finals = live.filter(l => l.pill === "Won" || l.pill === "Lost");
+  let tone, pill;
+  if (live.some(l => l.pill === "Lost")) { tone = "lose"; pill = "Lost"; }
+  else if (live.length && finals.length === live.length) { tone = "win"; pill = "Won"; }
+  else if (live.every(l => l.tone === "pre")) { tone = "pre"; pill = "Not started"; }
+  else if (live.some(l => l.tone === "lose")) { tone = "lose"; pill = `${live.length - hitting} leg${live.length - hitting === 1 ? "" : "s"} behind`; }
+  else { tone = "win"; pill = live.some(l => l.tone === "pre") ? "On track so far" : "All legs on track"; }
+  return { name: `${bet.legs.length}-leg parlay`, line: "", value: `${hitting}/${live.length}`, tone, pill, game: null, pct: null, legs };
 }
 
 async function safeEvaluate(bet) {
@@ -555,7 +590,29 @@ function teamTag(abbr, logo) {
   return frag;
 }
 
+function parlayCard(r) {
+  const c = el("article", "bet");
+  const meta = el("div", "meta");
+  meta.append(el("span", null, "Parlay"), el("span", "clock", `${r.legs.length} legs`));
+  const nums = el("div", "nums");
+  nums.append(el("span", `value ${r.tone}`, r.value), el("span", "line", "legs hitting"));
+  const legs = el("div", "legs");
+  for (const l of r.legs) {
+    const row = el("div", "leg");
+    const text = el("div", "leg-text");
+    text.append(el("div", "leg-name", l.name), el("div", "leg-sub", [l.pill, l.game?.clock].filter(Boolean).join(" · ")));
+    const val = el("div", "leg-val");
+    val.append(el("span", l.tone, l.value ?? "–"));
+    if (l.line) val.append(el("span", "leg-line", ` / ${l.line}`));
+    row.append(el("span", `dot ${l.tone}`), text, val);
+    legs.append(row);
+  }
+  c.append(meta, el("div", "name", r.name), nums, legs, el("span", `pill ${r.tone}`, r.pill));
+  return c;
+}
+
 function card(r) {
+  if (r.legs) return parlayCard(r);
   const c = el("article", "bet");
   const meta = el("div", "meta");
   const teams = el("span", "teams");
@@ -615,6 +672,7 @@ function describe(b) {
   if (b.type === "total") return `${teamsOf(b.game).join("/")} total ${ou}`;
   if (b.type === "team_total") return `${b.team} team total ${ou}`;
   if (b.type === "spread") return `${b.team} ${b.line > 0 ? "+" : ""}${b.line}`;
+  if (b.type === "parlay") return `${b.legs.length}-leg parlay: ${b.legs.map(describe).join(" + ")}`;
   return `${b.team} moneyline`;
 }
 
@@ -624,7 +682,7 @@ function renderList() {
   if (!bets.length && !fileBets.length) { list.append(el("p", "hint", "No bets yet.")); return; }
   for (const b of fileBets) {
     const row = el("div", "list-item");
-    row.append(el("span", null, `${b.league.toUpperCase()} · ${describe(b)}`), el("span", "tag", sharedSource === "sheet" ? "Sheet" : "bets.txt"));
+    row.append(el("span", null, `${(b.league || b.legs?.[0]?.league || "").toUpperCase()} · ${describe(b)}`), el("span", "tag", sharedSource === "sheet" ? "Sheet" : "bets.txt"));
     list.append(row);
   }
   bets.forEach((b, i) => {
