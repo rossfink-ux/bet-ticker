@@ -87,6 +87,10 @@ body {
 .g .trail { color: var(--dim); }
 .g .gclock { font-size: 19px; color: var(--dim); margin-left: 4px; }
 .g .gclock.live { color: var(--pre); }
+.g .down { font-size: 19px; color: var(--text); margin-left: 6px; }
+.g .down.rz { color: var(--lose); }
+.ball { display: inline-flex; width: 18px; height: 12px; margin-left: 2px; flex: none; }
+.ball svg { width: 100%; height: 100%; }
 .scores .none { padding: 0 22px; line-height: 58px; color: var(--dim); font-size: 19px; }
 .legs { display: grid; gap: 8px; margin: 6px 0 4px; }
 .leg { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
@@ -133,7 +137,7 @@ form button { grid-column: 1 / -1; background: #1d3a24; border-color: #2c5a37; }
 <header class="top wrap">
   <span><b class="win" id="nWin">0</b>winning or on pace</span>
   <span><b class="lose" id="nLose">0</b>behind</span>
-  <span><b class="pre" id="nPre">0</b>not started</span>
+  <span><b class="pre" id="nPre">0</b>not started or early</span>
   <span class="spacer"></span>
   <span class="stamp" id="stamp">Loading…</span>
   <button id="openEditor" type="button">Bets</button>
@@ -397,18 +401,21 @@ async function findGame(league, teams) {
   const order = { in: 0, pre: 1, post: 2 };
   const matches = [];
   for (const ev of data.events || []) {
-    const scores = {}, logos = {}; let home = "", away = "";
+    const scores = {}, logos = {}, ids = {}; let home = "", away = "";
     for (const c of ev.competitions[0].competitors) {
       const abbr = c.team.abbreviation.toUpperCase();
       scores[abbr] = Number(c.score) || 0;
       logos[abbr] = c.team.logo || "";
+      ids[c.id] = abbr;
       if (c.homeAway === "home") home = abbr; else away = abbr;
     }
+    const sit = ev.competitions[0].situation;
     if (teams.length && teams.every(t => t in scores)) {
       const st = ev.status;
       matches.push({
         id: ev.id, league, state: st.type.state, detail: st.type.shortDetail,
         period: st.period || 0, clock: st.clock || 0, scores, logos, home, away,
+        possession: st.type.state === "in" ? ids[sit?.possession] || "" : "", redZone: !!sit?.isRedZone,
       });
     }
   }
@@ -417,12 +424,13 @@ async function findGame(league, teams) {
 }
 
 // Share of regulation played, used to project a live stat to the end of the game.
-function gameFraction(game) {
+function gameFraction(game, raw = false) {
   if (game.state === "pre") return 0;
   if (game.state === "post") return 1;
   const [periods, length] = REGULATION[game.league] || [4, 900];
   if (game.period > periods) return 1;
   const played = length ? ((game.period - 1) * length + (length - game.clock)) / (periods * length) : (game.period - 0.5) / periods;
+  if (raw) return Math.min(1, played);
   return Math.min(1, Math.max(0.1, played)); // floor keeps the first minutes from projecting wild numbers
 }
 
@@ -481,20 +489,24 @@ function overUnder(game, current, side, line) {
     if (current === line) return { tone: "push", pill: "Push" };
     return { tone: winning ? "win" : "lose", pill: winning ? "Won" : "Lost" };
   }
+  // Too early for pace to mean anything (about the first 9 minutes of an NFL game).
+  const early = gameFraction(game, true) < 0.15;
   if (over) {
     if (winning) return { tone: "win", pill: "Hit" };
     const needs = fmt(Math.floor(line) + 1 - current);
+    if (early) return { tone: "pre", pill: `Early · needs ${needs}` };
     const onPace = current / gameFraction(game) > line;
     return { tone: onPace ? "win" : "lose", pill: `${onPace ? "On pace" : "Behind"} · needs ${needs}` };
   }
   if (!winning) return { tone: "lose", pill: "Over the line" };
   const room = fmt(Math.ceil(line) - 1 - current);
+  if (early) return { tone: "pre", pill: `Early · ${room} to spare` };
   const onPace = current / gameFraction(game) < line;
   return { tone: onPace ? "win" : "lose", pill: `${onPace ? "On pace" : "Trending over"} · ${room} to spare` };
 }
 
 function gameInfo(game) {
-  return { away: game.away, home: game.home, logos: game.logos, clock: game.state === "pre" ? game.detail.replace(" - ", " · ") : game.detail };
+  return { away: game.away, home: game.home, logos: game.logos, possession: game.possession, clock: game.state === "pre" ? game.detail.replace(" - ", " · ") : game.detail };
 }
 
 async function evaluate(bet) {
@@ -589,7 +601,15 @@ function el(tag, cls, text) {
   return e;
 }
 
-function teamTag(abbr, logo) {
+const BALL_SVG = '<svg viewBox="0 0 24 16" aria-hidden="true"><ellipse cx="12" cy="8" rx="11" ry="7" fill="#a0522d"/><path d="M7 8h10M9.5 6v4M12 6v4M14.5 6v4" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>';
+function ball() {
+  const b = el("span", "ball");
+  b.innerHTML = BALL_SVG;
+  b.title = "Has the ball";
+  return b;
+}
+
+function teamTag(abbr, logo, hasBall) {
   const frag = document.createDocumentFragment();
   if (logo) {
     const wrap = el("span", "logo");
@@ -600,6 +620,7 @@ function teamTag(abbr, logo) {
     frag.append(wrap);
   }
   frag.append(el("span", null, abbr));
+  if (hasBall) frag.append(ball());
   return frag;
 }
 
@@ -629,7 +650,10 @@ function card(r) {
   const c = el("article", "bet");
   const meta = el("div", "meta");
   const teams = el("span", "teams");
-  if (r.game) teams.append(teamTag(r.game.away, r.game.logos[r.game.away]), el("span", "at", "at"), teamTag(r.game.home, r.game.logos[r.game.home]));
+  if (r.game) {
+    const g = r.game;
+    teams.append(teamTag(g.away, g.logos[g.away], g.possession === g.away), el("span", "at", "at"), teamTag(g.home, g.logos[g.home], g.possession === g.home));
+  }
   meta.append(teams, el("span", "clock", r.game ? r.game.clock : ""));
 
   const nums = el("div", "nums");
@@ -670,13 +694,16 @@ async function loadScores() {
     const order = { in: 0, pre: 1, post: 2 };
     games = (data.events || []).map(ev => {
       const comp = ev.competitions[0];
+      const st = ev.status.type;
+      const sit = st.state === "in" ? comp.situation : null;
       const side = where => {
         const c = comp.competitors.find(x => x.homeAway === where);
-        return { abbr: c.team.abbreviation, logo: c.team.logo, score: Number(c.score) || 0 };
+        return { abbr: c.team.abbreviation, logo: c.team.logo, score: Number(c.score) || 0, hasBall: !!sit && sit.possession === c.id };
       };
-      const st = ev.status.type;
       const detail = st.state === "pre" ? st.shortDetail.replace(" - ", " ").replace(/ E[DS]T$/, "") : st.shortDetail;
-      return { state: st.state, detail, away: side("away"), home: side("home") };
+      // "2nd & 10 · IND 39"; empty between plays that have no down, like kickoffs and timeouts.
+      const down = sit?.shortDownDistanceText ? [sit.shortDownDistanceText, sit.possessionText].filter(Boolean).join(" · ") : "";
+      return { state: st.state, detail, down, redZone: !!sit?.isRedZone, away: side("away"), home: side("home") };
     }).sort((a, b) => order[a.state] - order[b.state]);
     scoresDirty = true;
   } catch { /* keep showing the last scores */ }
@@ -685,17 +712,18 @@ async function loadScores() {
 function gameChip(g) {
   const chip = el("span", "g");
   const team = (t, other) => {
-    chip.append(teamTag(t.abbr, t.logo));
+    chip.append(teamTag(t.abbr, t.logo, t.hasBall));
     if (g.state !== "pre") chip.append(el("span", `sc ${t.score < other.score ? "trail" : ""}`, String(t.score)));
   };
   team(g.away, g.home);
   team(g.home, g.away);
   chip.append(el("span", `gclock ${g.state === "in" ? "live" : ""}`, g.detail));
+  if (g.down) chip.append(el("span", `down ${g.redZone ? "rz" : ""}`, g.redZone ? `${g.down} · Red zone` : g.down));
   return chip;
 }
 
-// Two identical runs scroll side by side so the strip loops with no gap. New scores swap in
-// when a run finishes passing, so nothing jumps mid-read.
+// Two identical runs scroll side by side so the strip loops with no gap. New scores and
+// possession swap in on each refresh while the scroll position carries on.
 function buildScores() {
   const track = $("scoresTrack");
   track.replaceChildren();
@@ -712,18 +740,14 @@ function scrollScores(t) {
   const track = $("scoresTrack");
   const dt = lastFrame == null ? 0 : Math.min(0.1, (t - lastFrame) / 1000);
   lastFrame = t;
-  if (scoresDirty && !track.firstElementChild) { buildScores(); scoresDirty = false; }
+  if (scoresDirty) { buildScores(); scoresDirty = false; }
   const run = track.firstElementChild;
   const width = run && run.classList.contains("run") ? run.offsetWidth : 0;
   if (width) {
     scrollX -= SCROLL_PX_PER_SEC * dt;
-    if (scrollX <= -width) {
-      scrollX += width;
-      if (scoresDirty) { buildScores(); scoresDirty = false; }
-    }
+    scrollX %= width; // also keeps the position valid when the strip's width changes
   } else {
     scrollX = 0;
-    if (scoresDirty) { buildScores(); scoresDirty = false; }
   }
   track.style.transform = `translate3d(${scrollX}px,0,0)`;
   requestAnimationFrame(scrollScores);
