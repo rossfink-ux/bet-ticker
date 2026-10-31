@@ -62,7 +62,10 @@ body {
 .logo { width: 34px; height: 34px; border-radius: 50%; background: #eef1f3; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .logo img { width: 27px; height: 27px; object-fit: contain; }
 .at { color: #555c63; padding: 0 2px; }
+.rank { color: #a9b0b6; font-size: .88em; font-weight: 700; margin-right: -2px; }
 .clock { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.situation { font-size: 16px; font-weight: 600; color: var(--text); }
+.situation.rz { color: var(--lose); }
 .name { font-size: 21px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .nums { display: flex; align-items: baseline; gap: 8px; }
 .value { font-family: var(--num); font-size: 56px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
@@ -394,6 +397,22 @@ function getJSON(path) {
   return p;
 }
 
+// Start times show in Pacific: "3:15 PM PT" today, "Sun 10:00 AM PT" on another day.
+const PT = "America/Los_Angeles";
+function ptTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const day = x => x.toLocaleDateString("en-US", { timeZone: PT });
+  const time = d.toLocaleTimeString("en-US", { timeZone: PT, hour: "numeric", minute: "2-digit" });
+  if (day(d) === day(new Date())) return `${time} PT`;
+  return `${d.toLocaleDateString("en-US", { timeZone: PT, weekday: "short" })} ${time} PT`;
+}
+
+// "2nd & 10 · IND 39"; empty between plays that have no down, like kickoffs and timeouts.
+function downText(sit) {
+  return sit?.shortDownDistanceText ? [sit.shortDownDistanceText, sit.possessionText].filter(Boolean).join(" · ") : "";
+}
+
 function teamsOf(s) { return String(s || "").toUpperCase().split(/[\s/@,]+/).filter(Boolean); }
 
 async function findGame(league, teams) {
@@ -401,11 +420,12 @@ async function findGame(league, teams) {
   const order = { in: 0, pre: 1, post: 2 };
   const matches = [];
   for (const ev of data.events || []) {
-    const scores = {}, logos = {}, ids = {}; let home = "", away = "";
+    const scores = {}, logos = {}, ranks = {}, ids = {}; let home = "", away = "";
     for (const c of ev.competitions[0].competitors) {
       const abbr = c.team.abbreviation.toUpperCase();
       scores[abbr] = Number(c.score) || 0;
       logos[abbr] = c.team.logo || "";
+      ranks[abbr] = rankOf(c);
       ids[c.id] = abbr;
       if (c.homeAway === "home") home = abbr; else away = abbr;
     }
@@ -414,8 +434,9 @@ async function findGame(league, teams) {
       const st = ev.status;
       matches.push({
         id: ev.id, league, state: st.type.state, detail: st.type.shortDetail,
-        period: st.period || 0, clock: st.clock || 0, scores, logos, home, away,
+        period: st.period || 0, clock: st.clock || 0, scores, logos, ranks, home, away,
         possession: st.type.state === "in" ? ids[sit?.possession] || "" : "", redZone: !!sit?.isRedZone,
+        down: st.type.state === "in" ? downText(sit) : "", start: ev.date,
       });
     }
   }
@@ -506,7 +527,11 @@ function overUnder(game, current, side, line) {
 }
 
 function gameInfo(game) {
-  return { away: game.away, home: game.home, logos: game.logos, possession: game.possession, clock: game.state === "pre" ? game.detail.replace(" - ", " · ") : game.detail };
+  return {
+    away: game.away, home: game.home, logos: game.logos, ranks: game.ranks, possession: game.possession,
+    down: game.down, redZone: game.redZone,
+    clock: game.state === "pre" ? ptTime(game.start) || game.detail : game.detail,
+  };
 }
 
 async function evaluate(bet) {
@@ -609,8 +634,9 @@ function ball() {
   return b;
 }
 
-function teamTag(abbr, logo, hasBall) {
+function teamTag(abbr, logo, hasBall, rank) {
   const frag = document.createDocumentFragment();
+  if (rank) frag.append(el("span", "rank", String(rank)));
   if (logo) {
     const wrap = el("span", "logo");
     const img = new Image();
@@ -634,7 +660,8 @@ function parlayCard(r) {
   for (const l of r.legs) {
     const row = el("div", "leg");
     const text = el("div", "leg-text");
-    text.append(el("div", "leg-name", l.name), el("div", "leg-sub", [l.pill, l.game?.clock].filter(Boolean).join(" · ")));
+    const legName = l.name === "Game total" && l.game ? `${l.game.away}/${l.game.home} total` : l.name;
+    text.append(el("div", "leg-name", legName), el("div", "leg-sub", [l.pill, l.game?.clock].filter(Boolean).join(" · ")));
     const val = el("div", "leg-val");
     val.append(el("span", l.tone, l.value ?? "–"));
     if (l.line) val.append(el("span", "leg-line", ` / ${l.line}`));
@@ -652,15 +679,21 @@ function card(r) {
   const teams = el("span", "teams");
   if (r.game) {
     const g = r.game;
-    teams.append(teamTag(g.away, g.logos[g.away], g.possession === g.away), el("span", "at", "at"), teamTag(g.home, g.logos[g.home], g.possession === g.home));
+    teams.append(
+      teamTag(g.away, g.logos[g.away], g.possession === g.away, g.ranks[g.away]),
+      el("span", "at", "at"),
+      teamTag(g.home, g.logos[g.home], g.possession === g.home, g.ranks[g.home]),
+    );
   }
   meta.append(teams, el("span", "clock", r.game ? r.game.clock : ""));
+  c.append(meta);
+  if (r.game?.down) c.append(el("div", `situation ${r.game.redZone ? "rz" : ""}`, r.game.redZone ? `${r.game.down} · Red zone` : r.game.down));
 
   const nums = el("div", "nums");
   nums.append(el("span", `value ${r.tone}`, r.value ?? "–"));
   if (r.line) nums.append(el("span", "line", `/ ${r.line}`));
 
-  c.append(meta, el("div", "name", r.name), nums);
+  c.append(el("div", "name", r.name), nums);
   if (r.pct != null) {
     const bar = el("div", `bar ${r.tone}`);
     const fill = el("div", "bar-fill");
@@ -688,31 +721,41 @@ function render() {
 const SCROLL_PX_PER_SEC = 90;
 let games = [], scoresDirty = false;
 
+// AP Top 25 rank from ESPN (99 means unranked), or null.
+function rankOf(c) {
+  const r = c.curatedRank?.current;
+  return r >= 1 && r <= 25 ? r : null;
+}
+
+function stripGame(ev) {
+  const comp = ev.competitions[0];
+  const st = ev.status.type;
+  const sit = st.state === "in" ? comp.situation : null;
+  const side = where => {
+    const c = comp.competitors.find(x => x.homeAway === where);
+    return { abbr: c.team.abbreviation, logo: c.team.logo, score: Number(c.score) || 0, hasBall: !!sit && sit.possession === c.id, rank: rankOf(c) };
+  };
+  const detail = st.state === "pre" ? ptTime(ev.date) || st.shortDetail : st.shortDetail;
+  return { state: st.state, detail, down: downText(sit), redZone: !!sit?.isRedZone, away: side("away"), home: side("home") };
+}
+
+// NFL games plus college games with a Top 25 team (ESPN's default college scoreboard).
 async function loadScores() {
-  try {
-    const data = await getJSON(`${LEAGUES.nfl}/scoreboard`);
-    const order = { in: 0, pre: 1, post: 2 };
-    games = (data.events || []).map(ev => {
-      const comp = ev.competitions[0];
-      const st = ev.status.type;
-      const sit = st.state === "in" ? comp.situation : null;
-      const side = where => {
-        const c = comp.competitors.find(x => x.homeAway === where);
-        return { abbr: c.team.abbreviation, logo: c.team.logo, score: Number(c.score) || 0, hasBall: !!sit && sit.possession === c.id };
-      };
-      const detail = st.state === "pre" ? st.shortDetail.replace(" - ", " ").replace(/ E[DS]T$/, "") : st.shortDetail;
-      // "2nd & 10 · IND 39"; empty between plays that have no down, like kickoffs and timeouts.
-      const down = sit?.shortDownDistanceText ? [sit.shortDownDistanceText, sit.possessionText].filter(Boolean).join(" · ") : "";
-      return { state: st.state, detail, down, redZone: !!sit?.isRedZone, away: side("away"), home: side("home") };
-    }).sort((a, b) => order[a.state] - order[b.state]);
-    scoresDirty = true;
-  } catch { /* keep showing the last scores */ }
+  const [college, nfl] = await Promise.allSettled([
+    getJSON(`${LEAGUES.ncaaf}/scoreboard`),
+    getJSON(`${LEAGUES.nfl}/scoreboard`),
+  ]);
+  if (college.status === "rejected" && nfl.status === "rejected") return; // keep showing the last scores
+  const order = { in: 0, pre: 1, post: 2 };
+  const events = [college, nfl].flatMap(r => r.status === "fulfilled" ? r.value.events || [] : []);
+  games = events.map(stripGame).sort((a, b) => (order[a.state] ?? 3) - (order[b.state] ?? 3));
+  scoresDirty = true;
 }
 
 function gameChip(g) {
   const chip = el("span", "g");
   const team = (t, other) => {
-    chip.append(teamTag(t.abbr, t.logo, t.hasBall));
+    chip.append(teamTag(t.abbr, t.logo, t.hasBall, t.rank));
     if (g.state !== "pre") chip.append(el("span", `sc ${t.score < other.score ? "trail" : ""}`, String(t.score)));
   };
   team(g.away, g.home);
