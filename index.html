@@ -160,6 +160,7 @@ form button { grid-column: 1 / -1; background: #1d3a24; border-color: #2c5a37; }
           <option value="prop">Player prop</option>
           <option value="total">Game total</option>
           <option value="team_total">Team total</option>
+          <option value="punts">Game punts</option>
           <option value="spread">Spread</option>
           <option value="moneyline">Moneyline</option>
         </select>
@@ -304,6 +305,10 @@ function parseLine(text) {
   if (kind === "tt" || kind === "team_total") {
     if (t.length !== 1) throw new Error("team total is TEAM tt o27.5");
     return { type: "team_total", league, team: t[0], side, line };
+  }
+  if (kind === "punts") {
+    if (teamsOf(t.join(" ")).length !== 2) throw new Error("game punts is TEAM TEAM punts o7.5");
+    return { type: "punts", league, game: t.join(" "), side, line };
   }
   const stat = STAT_NAMES[kind];
   if (!stat) throw new Error(`unknown stat "${kind}"`);
@@ -500,6 +505,18 @@ async function playerStat(game, player, stat) {
   return found ? total : null;
 }
 
+// Team totals rather than the punters' rows: ESPN only counts a blocked punt in the totals.
+async function gamePunts(game) {
+  const summary = await getJSON(`${LEAGUES[game.league]}/summary?event=${game.id}`);
+  let total = 0;
+  for (const team of summary.boxscore?.players || []) {
+    const cat = team.statistics?.find(c => c.name === "punting");
+    const n = parseFloat(cat?.totals?.[cat.keys.indexOf("punts")]);
+    if (Number.isFinite(n)) total += n;
+  }
+  return total;
+}
+
 /* ---------- bet evaluation ---------- */
 const fmt = n => Number.isInteger(n) ? String(n) : String(+n.toFixed(1));
 
@@ -560,6 +577,14 @@ async function evaluate(bet) {
     const game = await findGame(league, teams);
     if (!game) return notFound(name);
     const current = bet.type === "team_total" ? (game.scores[teams[0]] || 0) : Object.values(game.scores).reduce((a, b) => a + b, 0);
+    return { name, line: ou, value: game.state === "pre" ? null : fmt(current), game: gameInfo(game), pct: line > 0 ? current / (line * 1.25) : null, ...overUnder(game, current, side, line) };
+  }
+
+  if (bet.type === "punts") {
+    const name = "Game punts";
+    const game = await findGame(league, teamsOf(bet.game));
+    if (!game) return notFound(name);
+    const current = game.state === "pre" ? 0 : await gamePunts(game);
     return { name, line: ou, value: game.state === "pre" ? null : fmt(current), game: gameInfo(game), pct: line > 0 ? current / (line * 1.25) : null, ...overUnder(game, current, side, line) };
   }
 
@@ -662,7 +687,8 @@ function parlayCard(r) {
   for (const l of r.legs) {
     const row = el("div", "leg");
     const text = el("div", "leg-text");
-    const legName = l.name === "Game total" && l.game ? `${l.game.away}/${l.game.home} total` : l.name;
+    const legName = l.game && l.name === "Game total" ? `${l.game.away}/${l.game.home} total`
+      : l.game && l.name === "Game punts" ? `${l.game.away}/${l.game.home} punts` : l.name;
     text.append(el("div", "leg-name", legName), el("div", "leg-sub", [l.pill, l.game?.clock].filter(Boolean).join(" · ")));
     const val = el("div", "leg-val");
     val.append(el("span", l.tone, l.value ?? "–"));
@@ -823,6 +849,7 @@ function describe(b) {
   if (b.type === "prop") return `${b.player} ${STATS[b.stat]?.[0] || b.stat} ${ou}`;
   if (b.type === "total") return `${teamsOf(b.game).join("/")} total ${ou}`;
   if (b.type === "team_total") return `${b.team} team total ${ou}`;
+  if (b.type === "punts") return `${teamsOf(b.game).join("/")} punts ${ou}`;
   if (b.type === "spread") return `${b.team} ${b.line > 0 ? "+" : ""}${b.line}`;
   if (b.type === "parlay") return `${b.legs.length}-leg parlay: ${b.legs.map(describe).join(" + ")}`;
   return `${b.team} moneyline`;
@@ -849,13 +876,13 @@ function renderList() {
 
 function syncFields() {
   const type = $("f-type").value;
-  $("l-game").hidden = !(type === "prop" || type === "total");
+  $("l-game").hidden = !(type === "prop" || type === "total" || type === "punts");
   $("l-team").hidden = !(type === "team_total" || type === "spread" || type === "moneyline");
   $("l-player").hidden = $("l-stat").hidden = type !== "prop";
   $("l-side").hidden = type === "spread" || type === "moneyline";
   $("l-line").hidden = type === "moneyline";
   $("f-game").placeholder = type === "prop" ? "BUF" : "GB DET";
-  $("f-line").placeholder = type === "spread" ? "-3.5" : type === "total" ? "50" : "30.5";
+  $("f-line").placeholder = type === "spread" ? "-3.5" : type === "total" ? "50" : type === "punts" ? "7.5" : "30.5";
 }
 
 for (const [key, [label]] of Object.entries(STATS)) {
@@ -869,7 +896,7 @@ $("betForm").onsubmit = e => {
   e.preventDefault();
   const type = $("f-type").value;
   const bet = { type, league: $("f-league").value };
-  if (type === "prop" || type === "total") bet.game = $("f-game").value.trim();
+  if (type === "prop" || type === "total" || type === "punts") bet.game = $("f-game").value.trim();
   if (type === "team_total" || type === "spread" || type === "moneyline") bet.team = $("f-team").value.trim();
   if (type === "prop") { bet.player = $("f-player").value.trim(); bet.stat = $("f-stat").value; }
   if (type !== "spread" && type !== "moneyline") bet.side = $("f-side").value;
